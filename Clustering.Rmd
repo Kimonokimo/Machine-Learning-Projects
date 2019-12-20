@@ -1,0 +1,441 @@
+---
+title: "New Clustering"
+author: "Ran Dou, Mduduzi Langwenya, Kimo Li, Siyan Lin, Muhammad Furqan Shaikh, Tianyi Zhou"
+date: "4/7/2019"
+output: word_document
+---
+
+load all libraries
+```{r, message=FALSE, warning=FALSE}
+rm(list = ls())
+library(cluster)
+library(tidyverse)
+library(NbClust)
+library(factoextra)
+library(clValid)
+library(writexl)
+library(corrplot)
+library(pROC)
+library(leaps)
+library(car)
+library(forecast)
+library(knitr)
+library(caret)
+```
+
+### I. Data cleaning and impution
+
+##### Data importing
+```{r, warning=FALSE, message=FALSE}
+###import the raw diabetes data
+diabetes <- read_csv("diabetes.csv")
+###delete all the missing valuse
+diabetes1 <- diabetes %>%
+  filter( Glucose !=0 & BMI != 0 & BloodPressure != 0 & Insulin != 0 & SkinThickness != 0) %>%
+  dplyr::select(Glucose, Insulin, Outcome, BMI, SkinThickness )
+```
+
+##### Fill-in Zero Value
+###### 1) Insulin
+```{r,message=FALSE,  echo=T, results='hide'}
+### Insulin 
+# stepwise for choosing models for Insulin 
+insu.lm.null <- lm(Insulin~1, data = diabetes1)
+insu.lm <- lm(Insulin~., data = diabetes1)
+insu.lm.step_both <- step(insu.lm, direction = "both")
+sum_both <- summary(insu.lm.step_both)
+### create the model for imputing Insulin missing values
+lm.data <- lm (Insulin ~ Glucose + BMI, data=diabetes1)
+pred.1 <- predict (lm.data, diabetes1)
+impute <-function(a, a.impute){
+         ifelse(a$Insulin == 0, round(a.impute, 0), a$Insulin)
+}
+diabetes$newInsu <- impute(diabetes, pred.1)
+rm( insu.lm, insu.lm.null, insu.lm.step_both, sum_both, lm.data)
+```
+
+###### 2) Skinthickness 
+```{r}
+### stepwise for choosing models for Insulin 
+skin.lm.null <- lm(SkinThickness~1, data = diabetes1)
+skin.lm <- lm(SkinThickness~., data = diabetes1)
+skin.lm.step_both <- step(skin.lm, direction = "both")
+sum_both_skin <- summary(skin.lm.step_both)
+### create the model for imputing SkinThickness missing values
+lm2.data <- lm(SkinThickness ~ BMI, data=diabetes1)
+pred.2 <- predict (lm2.data, diabetes1)
+impute <-function(a, a.impute){
+  ifelse(a$SkinThickness == 0, round(a.impute, 0), a$SkinThickness)
+}
+diabetes$newSkin <- impute(diabetes, pred.2)
+rm(skin.lm.null, skin.lm, skin.lm.step_both, sum_both_skin, lm2.data, pred.2,diabetes1, impute, pred.1)
+diabetes$SkinThickness <- NULL
+diabetes$Insulin <- NULL
+diabetes <- diabetes %>%
+  dplyr::rename(Insulin = "newInsu",
+         SkinThickness = "newSkin")
+diabetes<- as_tibble(diabetes)
+diabetes <- diabetes %>%
+  filter( Glucose !=0 & BMI != 0 & BloodPressure != 0 & Insulin != 0 & SkinThickness != 0 &Age!=0) %>%
+  dplyr::select(Glucose, Insulin, Outcome, BMI, SkinThickness,Age,Pregnancies,BloodPressure,DiabetesPedigreeFunction)
+diabetes.copy<-diabetes
+```
+
+#######################################################################################
+
+### 1. K-Means Clustering
+
+1. Scaling 
+```{r}
+diabetes_kmeans <- diabetes
+# ==========
+dia.df.num = model.matrix(~ Pregnancies + Glucose + BMI + DiabetesPedigreeFunction +
+                            Age + BloodPressure + SkinThickness + Insulin 
+                            ,  data = diabetes_kmeans)
+scaled_data = data.frame(scale(dia.df.num[,-1]))
+```
+
+2. Choose Number of Clusters- Use Within Sum of Squares (wss)
+```{r}
+## How many clusters to choose?
+## ============================
+k.max <- 15
+wss <- sapply(1:k.max, 
+              function(k){kmeans(scaled_data, k, nstart=50,iter.max = 1000 )$tot.withinss})
+wss
+plot(1:k.max, wss,
+     type="b", pch = 19, frame = FALSE, 
+     xlab="Number of clusters K",
+     ylab="Total within-clusters sum of squares")
+```
+
+3. K-Means Clustering - I chose 3 Groups
+```{r}
+set.seed(1234)
+# Find 2  groups
+# ==========        # because starting assignments are random
+dia.k2 <- kmeans(scaled_data , centers=2, nstart = 50, iter.max = 20 )
+#visualize clusters
+fviz_cluster(dia.k2, data = scaled_data)
+#find out more about PCA
+library("FactoMineR")
+dia.pca <- PCA(scaled_data, graph = FALSE)
+# Contributions of variables on PC1
+fviz_pca_contrib(dia.pca, choice = "var", axes = 1)
+# Contributions of variables on PC2
+fviz_pca_contrib(dia.pca, choice = "var", axes = 2)
+# Total contribution on PC1 and PC2
+fviz_pca_contrib(dia.pca, choice = "var", axes = 1:2,  top = 5)
+```
+
+```{r}
+#add cluster back to dataframe
+diabetes_kmeans$cluster <- dia.k2$cluster
+#rename levels 
+diabetes_kmeans$cluster <- gsub(1, 0, diabetes_kmeans$cluster,ignore.case=T)
+diabetes_kmeans$cluster <- gsub(2, 1, diabetes_kmeans$cluster,ignore.case=T)
+#change data types
+diabetes_kmeans$cluster <- as.factor(diabetes_kmeans$cluster)
+diabetes_kmeans$Outcome <- as.factor(diabetes_kmeans$Outcome)
+library(caret)
+confusionMatrix(diabetes_kmeans$Outcome, diabetes_kmeans$cluster,positive = "1")
+```
+
+# plotting 
+```{r}
+diabetes_kmeans$cluster <- as.factor(diabetes_kmeans$cluster)
+#plot glucose and BMI
+ggplot(diabetes_kmeans, aes(Age, Pregnancies, col = cluster)) + 
+  geom_point(stat = "identity") +
+  labs(title = "Age vs Pregnancies by Cluster")
+#plot glucose and BMI
+ggplot(diabetes_kmeans, aes(Age, SkinThickness, col = factor(cluster))) + 
+  geom_point(stat = "identity")
+```
+
+```{r}
+#plot glucose and pregnancies
+ggplot(diabetes_kmeans, aes(Age, BMI, col =cluster)) + 
+  geom_point(stat = "identity") + labs(title = "Age vs BMI by cluster")
+```
+
+```{r}
+#plot blood pressue and insulin
+ggplot(diabetes_kmeans, aes(BMI, Pregnancies, col = cluster)) + 
+  geom_point(stat = "identity") + 
+  labs("Pregnancies vs BMI by cluster")
+```
+
+#######################################################################################
+
+### 2. Hcluster
+```{r}
+diabetes_hclust <-diabetes.copy
+# delete outcome. take glucose as target
+diabetes_hclust <- diabetes_hclust%>% dplyr::select(-"Outcome")
+# normalize input variables
+diabetes_hclust.df.norm <- as.data.frame(sapply(diabetes_hclust, scale))
+#diabetes_hclust.df.norm$Outcome <- diabetes_hclust.copy$Outcome
+# add row names: 
+row.names(diabetes_hclust.df.norm) <- row.names(diabetes_hclust) 
+dhclust.norm <- dist(diabetes_hclust.df.norm, method = "euclidean")  
+# in hclust() set argument method =  
+# to "ward.D", "single", "complete", "average", "median", or "centroid",  246 work
+hc1 <- hclust(dhclust.norm, method = "single")
+plot(hc1, main = "Single Linkage Clustering", hang = -1, labels=FALSE)
+hc2 <- hclust(dhclust.norm, method = "average")
+plot(hc2, main = "Average Linkage Clustering", hang = -1, labels=FALSE)
+hc3 <- hclust(dhclust.norm, method = "median")
+plot(hc3, main = "Median Linkage Clustering", hang = -1, labels=FALSE)
+hc4 <- hclust(dhclust.norm, method = "complete")
+plot(hc4, main = "Complete Linkage Clustering", hang = -1, labels=FALSE)
+hc5 <- hclust(dhclust.norm, method = "centroid")
+plot(hc5, main = "Centroid Linkage Clustering", hang = -1, labels=FALSE)
+hc6 <- hclust(dhclust.norm, method = "ward.D")
+plot(hc6, main = "Ward.D Linkage Clustering", hang = -1, labels=FALSE)
+```
+
+```{r}
+
+####plot the histogram of clusters to decide the k
+# ward clusters are more evenly 
+
+memb6<-cutree(hc6,k=2)
+hist(memb6)
+```
+
+
+```{r}
+# methods to assess
+m <- c( "average",  "complete", "ward")
+names(m) <- c( "average",  "complete", "ward")
+# function to compute coefficient
+ac <- function(x) {
+  agnes(diabetes_hclust.df.norm, method = x)$ac
+}
+map_dbl(m, ac)
+```
+
+
+```{r}
+# hcw <- agnes(dhclust.norm, method = "ward")
+# 
+# pltree(hcw, cex = 0.6, hang = -1, main = "Dendrogram of agnes")
+```
+
+```{r}
+# Cut tree into 2 groups
+# grouping <- cutree(hcw, k = 2)
+diabetes_hclust$Outcome <- diabetes.copy$Outcome
+diabetes_hclust$OutcomeClust <-memb6
+#rename levels
+diabetes_hclust$OutcomeClust <- gsub(2, 0, diabetes_hclust$OutcomeClust,ignore.case=T)
+#change data types
+diabetes_hclust$OutcomeClust <- as.factor(diabetes_hclust$OutcomeClust)
+diabetes_hclust$Outcome <- as.factor(diabetes_hclust$Outcome)
+#confusion Matrix
+confusionMatrix(diabetes_hclust$Outcome, diabetes_hclust$OutcomeClust,positive = "1")
+```
+
+```{r}
+fviz_dend(hc6, k = 2, 
+          cex = 0.5, 
+          k_colors = c("#2E9FDF", "#00AFBB"),
+          color_labels_by_k = TRUE, 
+          rect = TRUE          
+)
+```
+
+```{r}
+
+# set labels as cluster membership number : utility name
+row.names(diabetes_hclust.df.norm) <- paste(memb6, ": ", row.names(diabetes_hclust), sep = "")
+# plot heatmap 
+# rev() reverses the color mapping to large = dark
+heatmap(as.matrix(diabetes_hclust.df.norm), Colv = NA, hclustfun = hclust, 
+        col=rev(paste("grey",1:99,sep="")))
+```
+
+```{r}
+# new dataset with cluster results
+diabetes_hclust <- diabetes_hclust %>% mutate(HierCluster=memb6)
+# Create theme for plots
+theme <- theme_test(base_family = "Times New Roman") + theme(plot.title = element_text(hjust = 0.5), 
+         legend.position = "bottom", panel.grid.minor = element_blank(), axis.ticks.x = element_blank(),
+         axis.ticks.y = element_blank(), panel.grid.major = element_blank())
+```
+
+```{r}
+# get boxplot of glucose for different clusters with three methods
+##Glucose
+ggplot(diabetes_hclust, aes(x = as.factor(HierCluster), y = Glucose   )) +
+  geom_boxplot(colour = "black") +
+  theme + labs(title = "Distribution of Glucose by cluster ", x = "cluster", y = "Glucose")
+#BMI
+ggplot(diabetes_hclust, aes(x = as.factor(HierCluster), y = BMI   )) +
+  geom_boxplot(colour = "black") +
+  theme + labs(title = "Distribution of BMI by cluster ", x = "cluster", y = "BMI")
+#age
+ggplot(diabetes_hclust, aes(x = as.factor(HierCluster), y = Age  )) +
+  geom_boxplot(colour = "black") +
+  theme + labs(title = "Distribution of age by cluster ", x = "cluster", y = "Age")
+#DiabetesPedigreeFunction
+ggplot(diabetes_hclust, aes(x = as.factor(HierCluster), y = DiabetesPedigreeFunction  )) +
+  geom_boxplot(colour = "black") +
+  theme + labs(title = "Distribution of DiabetesPedigreeFunction by cluster ", x = "cluster", y = "DiabetesPedigreeFunction")
+#BloodPressure
+ggplot(diabetes_hclust, aes(x = as.factor(HierCluster), y = BloodPressure  )) +
+  geom_boxplot(colour = "black") +
+  theme + labs(title = "Distribution of BloodPressure by cluster ", x = "cluster", y = "BloodPressure")
+#Insulin
+ggplot(diabetes_hclust, aes(x = as.factor(HierCluster), y =Insulin  )) +
+  geom_boxplot(colour = "black") +
+  theme + labs(title = "Distribution of Insulin by cluster ", x = "cluster", y = "Insulin")
+# ggplot(diabetes_hclust, aes(x = as.factor(HierCluster2), y = Glucose)) +
+#   geom_boxplot(colour = "black") +
+#   theme + labs(title = "Distribution of Glucose by cluster of complete method", x = "cluster", y = "Glucose")
+# 
+# ggplot(diabetes_hclust, aes(x = as.factor(HierCluster3), y = Glucose)) +
+#   geom_boxplot(colour = "black") +
+#   theme + labs(title = "Distribution of Glucose by cluster of ward method", x = "cluster", y = "Glucose")
+cluster_outcome<-diabetes_hclust %>% group_by(HierCluster,Outcome) %>% summarise(n=n())
+write_xlsx(cluster_outcome, path =  "cluster_outcome.xlsx",col_names = TRUE,
+  format_headers = TRUE)
+#Outcome ~ Glucose +  BMI + Age+DiabetesPedigreeFunction + BloodPressure 
+```
+
+
+```{r}
+#plot BMI and glucose
+ggplot(diabetes_hclust, aes(BMI, Glucose, col = factor(HierCluster))) + 
+  geom_point(stat = "identity")+theme
+```
+
+
+```{r}
+#plot Age and glucose
+ggplot(diabetes_hclust, aes(Age, Glucose, col = factor(HierCluster))) + 
+  geom_point(stat = "identity")+theme
+```
+```{r}
+#DiabetesPedigreeFunction and glucose
+ggplot(diabetes_hclust, aes(SkinThickness, Age, col = factor(HierCluster))) + 
+  geom_point(stat = "identity")+theme
+```
+
+
+```{r}
+#plot insulin and glucose
+ggplot(diabetes_hclust, aes(Insulin, Glucose, col = factor(HierCluster))) + 
+  geom_point(stat = "identity")+theme
+```
+
+
+```{r}
+#plot BloodPressure and glucose
+ggplot(diabetes_hclust, aes(BloodPressure, Glucose, col = factor(HierCluster))) + 
+  geom_point(stat = "identity")+theme
+```
+###age
+```{r}
+#plot age and Bloodpressure
+ggplot(diabetes_hclust, aes(DiabetesPedigreeFunction, Age, col = factor(HierCluster))) + 
+  geom_point(stat = "identity")+theme
+```
+
+
+
+
+
+#######################################################################################
+
+### 3. Improvement of Models
+
+##### With Cluster (Ward)
+
+```{r}
+data2 <- diabetes.copy
+data2$KMeansCluster <- dia.k2$cluster
+data2$HierCluster <- memb6
+# divide data into train and test set
+set.seed(1)
+randOrder = order(runif(nrow(data2)))
+train.df2 = subset(data2,randOrder < .8 * nrow(data2))
+test.df2 = subset(data2,randOrder > .8 * nrow(data2))
+```
+
+##### Without Cluster
+
+```{r}
+train.df1 <- train.df2 %>% dplyr::select(-c(KMeansCluster, HierCluster))
+test.df1 <- test.df2 %>% dplyr::select(-c(KMeansCluster, HierCluster))
+```
+
+##### correlation matrix
+
+```{r, fig.width=10}
+# plot the correlation matrix visual
+par(mfrow=c(1,2))
+### Original
+corr.df <- train.df1
+corr.df$Pregnancies <- as.numeric(corr.df$Pregnancies)
+cor <- cor(corr.df)
+col <- colorRampPalette(c("#BB4444", "#EE9988", "#FFFFFF", "#77AADD", "#4477AA"))
+corrplot3 <- corrplot(cor, method="color", col=col(200),
+         type="upper", order="hclust", 
+         addCoef.col = "black", # Add coefficient of correlation
+         tl.col="black", tl.srt=45, #Text label color and rotation
+         # Combine with significance
+         sig.level = 0.01, insig = "blank", 
+         # hide correlation coefficient on the principal diagonal
+         diag=FALSE, title = "Original"
+         )
+### Ward
+corr.df <- train.df2
+corr.df$Pregnancies <- as.numeric(corr.df$Pregnancies)
+cor <- cor(corr.df)
+col <- colorRampPalette(c("#BB4444", "#EE9988", "#FFFFFF", "#77AADD", "#4477AA"))
+corrplot3 <- corrplot(cor, method="color", col=col(200),
+         type="upper", order="hclust", 
+         addCoef.col = "black", # Add coefficient of correlation
+         tl.col="black", tl.srt=45, #Text label color and rotation
+         # Combine with significance
+         sig.level = 0.01, insig = "blank", 
+         # hide correlation coefficient on the principal diagonal
+         diag=FALSE, title = "Ward"
+         )
+```
+
+### Regression
+
+```{r}
+### Without Cluster
+# create model with no predictors for bottom of search range
+dia.lm.null1 <- glm(Outcome~1, data = train.df1, family = "binomial")
+dia.lm1 <- glm(Outcome~., data = train.df1,family = "binomial")
+# Backward Step-wise
+dia.lm.step_back1 <- step(dia.lm1, direction = "backward")
+sum_back1 <- summary(dia.lm.step_back1); sum_back1
+# Confusion matrix and Accuracy
+tst_pred1 <- ifelse(predict(dia.lm.step_back1, newdata = test.df1, type = "response") > 0.55, 1, 0)
+tst_tab1 <- table(predicted = tst_pred1, actual = test.df1$Outcome)
+sum(diag(tst_tab1))/sum(tst_tab1)
+test_prob1 <- predict(dia.lm.step_back1, newdata = test.df1, type = "response")
+test_roc1 <- roc(test.df1$Outcome ~ test_prob1, plot = TRUE, print.auc = TRUE) # 0.774
+confusionMatrix(table(predicted = tst_pred1, actual = test.df1$Outcome), positive = "1")
+
+### With Cluster
+# create model with no predictors for bottom of search range
+dia.lm.null2 <- glm(Outcome~1, data = train.df2, family = "binomial")
+dia.lm2 <- glm(Outcome~., data = train.df2, family = "binomial")
+# Backward Step-wise
+dia.lm.step_back2 <- step(dia.lm2, direction = "backward")
+sum_back2 <- summary(dia.lm.step_back2); sum_back2
+# Confusion matrix and Accuracy
+tst_pred2 <- ifelse(predict(dia.lm.step_back2, newdata = test.df2, type = "response") > 0.55, 1, 0)
+tst_tab2 <- table(predicted = tst_pred2, actual = test.df2$Outcome)
+sum(diag(tst_tab2))/sum(tst_tab2)
+test_prob2 <- predict(dia.lm.step_back2, newdata = test.df2, type = "response")
+test_roc2 <- roc(test.df2$Outcome ~ test_prob2, plot = TRUE, print.auc = TRUE) # 0.774
+confusionMatrix(table(predicted = tst_pred2, actual = test.df2$Outcome), positive = "1")
+```
