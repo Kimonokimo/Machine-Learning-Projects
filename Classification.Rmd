@@ -1,0 +1,349 @@
+---
+title: "Classification"
+author: "Ran Dou, Mduduzi Langwenya, Kimo Li, Siyan Lin, Muhammad Furqan Shaikh, Tianyi Zhou"
+date: "03/25/2019"
+output: html_document
+---
+
+### Load the packages
+```{r, message=FALSE, warning=FALSE}
+rm(list = ls(all = TRUE))
+library(tidyverse)
+library(forecast)
+library(leaps)
+library(pROC)
+library(reshape)
+library(corrplot)
+library(broom)
+library(caret)
+library(class)
+library(e1071)
+library(rpart)
+library(rattle)
+library(rpart.plot)
+library(RColorBrewer)
+library(verification)
+```
+
+### I. Data cleaning and impution
+
+##### Data importing
+```{r, warning=FALSE, message=FALSE}
+###import the raw diabetes data
+diabetes <- read_csv("diabetes.csv")
+###delete all the missing valuse
+diabetes1 <- diabetes %>%
+  filter( Glucose !=0 & BMI != 0 & BloodPressure != 0 & Insulin != 0 & SkinThickness != 0) %>%
+  dplyr::select(Glucose, Insulin, Outcome, BMI, SkinThickness )
+```
+
+##### Fill-in Zero Value
+###### 1) Insulin
+```{r,  message=FALSE}
+### Insulin 
+# stepwise for choosing models for Insulin 
+insu.lm.null <- lm(Insulin~1, data = diabetes1)
+insu.lm <- lm(Insulin~., data = diabetes1)
+summary(insu.lm.null)
+summary(insu.lm)
+insu.lm.step_both <- step(insu.lm, direction = "both")
+sum_both <- summary(insu.lm.step_both)
+### create the model for imputing Insulin missing values
+lm.data <- lm (Insulin ~ Glucose + BMI, data=diabetes1)
+pred.1 <- predict (lm.data, diabetes1)
+impute <-function(a, a.impute){
+         ifelse(a$Insulin == 0, round(a.impute, 0), a$Insulin)
+}
+diabetes$newInsu <- impute(diabetes, pred.1)
+rm( insu.lm, insu.lm.null, insu.lm.step_both, sum_both, lm.data)
+```
+
+###### 2) Skinthickness 
+```{r}
+### stepwise for choosing models for Insulin 
+skin.lm.null <- lm(SkinThickness~1, data = diabetes1)
+skin.lm <- lm(SkinThickness~., data = diabetes1)
+skin.lm.step_both <- step(skin.lm, direction = "both")
+sum_both_skin <- summary(skin.lm.step_both)
+### create the model for imputing SkinThickness missing values
+lm2.data <- lm(SkinThickness ~ BMI, data=diabetes1)
+pred.2 <- predict (lm2.data, diabetes1)
+impute <-function(a, a.impute){
+  ifelse(a$SkinThickness == 0, round(a.impute, 0), a$SkinThickness)
+}
+diabetes$newSkin <- impute(diabetes, pred.2)
+
+rm(skin.lm.null, skin.lm, skin.lm.step_both, sum_both_skin, lm2.data, pred.2,diabetes1)
+```
+
+```{r}
+################################ logistic regression part #############################
+# CHANGE DATA TYPE
+diabetes$Outcome <- as.factor(diabetes$Outcome)
+diabetes$Pregnancies <- as.factor(diabetes$Pregnancies)
+diabetes$Insulin <- NULL
+diabetes$SkinThickness <- NULL
+diabetes$newSkin <- NULL
+
+
+# divide data into train and test set
+set.seed(1)
+randOrder = order(runif(nrow(diabetes)))
+train.df = subset(diabetes,randOrder < .8 * nrow(diabetes))
+test.df = subset(diabetes,randOrder > .8 * nrow(diabetes))
+```
+
+##### correlation matrix
+
+```{r, fig.width=6}
+# plot the correlation matrix visual
+corr.df <- train.df
+corr.df$Outcome <- as.numeric(corr.df$Outcome)
+corr.df$Pregnancies <- as.numeric(corr.df$Pregnancies)
+cor <- cor(corr.df)
+col <- colorRampPalette(c("#BB4444", "#EE9988", "#FFFFFF", "#77AADD", "#4477AA"))
+corrplot(cor, method="color", col=col(200),  
+         type="upper", order="hclust", 
+         addCoef.col = "black", # Add coefficient of correlation
+         tl.col="black", tl.srt=45, #Text label color and rotation
+         # Combine with significance
+         sig.level = 0.01, insig = "blank", 
+         # hide correlation coefficient on the principal diagonal
+         diag=FALSE 
+         )
+```
+
+```{r}
+train.df$Outcome <- as.factor(train.df$Outcome)
+train.df$Pregnancies <- as.factor(train.df$Pregnancies)
+```
+
+################################################################################################### 
+
+# Logistic Regression
+
+```{r}
+### Forward Step-wise
+# create model with no predictors for bottom of search range
+nothing <- glm(Outcome~1, data = train.df, family = binomial)
+fullmod <- glm(Outcome~., data = train.df, family = binomial)
+
+# Backward Step-wise
+backwards <- step(fullmod, trace =0); sum_back <- summary(backwards) 
+
+#  forward selection
+forward<-step(nothing,list(lower=formula(nothing), upper=formula(fullmod)), direction = "forward", trace = 0)
+sum_for <- summary(forward) 
+
+# Both Direction Step-wise
+both <- step(fullmod, scope = list(lower=formula(nothing),upper=formula(fullmod)), direction="both",trace=0)
+sum_both <- summary(both) 
+
+# best model with aic
+sum_for$aic
+
+
+or <-round(exp(sum_for$coef),4);or
+```
+
+```{r, message=FALSE}
+#CONFUSION MATRIX 
+#load caret library
+library(caret)
+
+# Prediction on train data (in-sample) and accuracy test 
+logit.reg.train <- predict(forward, newdata = train.df, type = "response")
+confusionMatrix(as.factor(ifelse(logit.reg.train > 0.55, 1, 0)), as.factor(train.df$Outcome))
+
+# Prediction on test data (out of sample)and accuracy test
+logit.reg.test <- predict(forward, newdata = test.df, type = "response")
+confusionMatrix(as.factor(ifelse(logit.reg.test > 0.55, 1, 0)), as.factor(test.df$Outcome))
+
+```
+
+```{r}
+#ROC 
+test_prob <- predict(forward, newdata = test.df, type = "response")
+test_roc <- roc(test.df$Outcome ~ test_prob, plot = TRUE, print.auc = TRUE) # 0.774
+```
+
+```{r, fig.width=3}
+#Residuals 
+model1_data <- augment(forward) %>% 
+  mutate(index = 1:n()) %>%
+  mutate(Outcome = ifelse(Outcome == "1", "0", "1"))
+### Create theme for plots
+theme <- theme_test(base_family = "Times New Roman") + theme(plot.title = element_text(hjust = 0.5), 
+         legend.position = "bottom", panel.grid.minor = element_blank(), axis.ticks.x = element_blank(),
+         axis.ticks.y = element_blank(), panel.grid.major = element_blank())
+c <- ggplot(model1_data, aes(index, .std.resid, color = Outcome)) + 
+  geom_point(stat = "identity") +
+  labs(title = "Standardized Deviance Residuals", y = "Residual Std", x ="Residuals") 
+c
+```
+
+################################################################################################### 
+
+# Classification Tree
+
+```{r}
+rm(backwards, both, forward, fullmod, model1_data, nothing, or, sum_back, sum_both, sum_for, test_roc, logit.reg.test, logit.reg.train, pred.1, randOrder, test_prob)
+```
+
+Classification tree can grab the information given by a data set and conclude the target value from it. Therefore, we don't have to choose the independent variables by our own because the classification tree will automatically select the most suitable variables.
+
+We first tested the accuracy of five basic classification tree models. In all the five models, the diagnostic result is depend on all the other variables in the dataset. The first model uses the default cp value of 0.01, and we change the cp value in the second to the fourth model to 1, 0.1, and 0.001 to check the differences. Moreover, we also set the 'split' of the fifth model into "information" to discover whether it is useful. We used the accuracy and the F-measure to represent the performance of the model. It turns out that the model uses "information" of the data to split the outcome has the best accuracy of 0.7468 and the F-measure 0.8186. The plot below shows the preliminary model we got from previous analysis, and we are going to improve it by pruning it.
+
+First, we calculated the x-val relative error for different cp values. The line plot below shows that the lowest x-val relative error happens on cp=0.13825 and cp=0.18433. This means that with these cp values, the model fit the data best with relatively low overfitting. Then we tested the performance of pruning by cp=0.01, 0.015, and 0.02, and we figured out that cp=0.02 turns out a better performance. The accuracy of the pruned model on test data is 0.7597.
+```{r}
+set.seed(1)
+
+# Basic classification tree
+tree <- rpart(Outcome ~., train.df, method = "class")
+tree_cp1 <- rpart(Outcome ~ ., train.df, method = "class", control = rpart.control(cp=1))
+tree_cp01 <- rpart(Outcome ~ ., train.df, method = "class", control = rpart.control(cp=0.1))
+tree_cp0001 <- rpart(Outcome ~ ., train.df, method = "class", control = rpart.control(cp=0.001))
+tree_i <- rpart(Outcome ~ ., train.df, method = "class", parms = list(split = "information"))
+
+# Creat function for evaluation
+evaluation <- function(model, data, atype) {
+  print(model$call)
+  prediction = predict(model, data, type=atype)
+  xtab = table(prediction, data$Outcome)
+  accuracy = sum(prediction == data$Outcome)/length(data$Outcome)
+  precision = xtab[1,1]/sum(xtab[,1])
+  recall = xtab[1,1]/sum(xtab[1,])
+  f = 2 * (precision * recall) / (precision + recall)
+  cat(paste("Accuracy:\t", format(accuracy, digits=4), "\n",sep=" "))
+  cat(paste("F-measure:\t", format(f, digits=4), "\n",sep=" "))
+}
+
+evaluation(tree, test.df, "class")
+evaluation(tree_cp1, test.df, "class")
+evaluation(tree_cp01, test.df, "class")
+evaluation(tree_cp0001, test.df, "class")
+evaluation(tree_i, test.df, "class")
+
+# The model with split="information"
+tree_i.pred <- predict(tree_i, test.df, type = "class")
+tree_i.conf <- table(pred=tree_i.pred, true=test.df$Outcome); tree_i.conf
+tree_i.acc <- sum(diag(tree_i.conf)) / sum(tree_i.conf); tree_i.acc
+rpart.plot(tree_i, extra = 104, nn = TRUE)
+printcp(tree_i)
+tree.best <- which.min(tree_i$cptable[,"xerror"])  #get index of CP with lowest xerror
+cp <- tree_i$cptable[tree.best, "CP"]; cp  # get its value
+plotcp(tree_i) # X-val Relative Error
+```
+
+According to the summary of the model, the importance of different variables in the model are Glucose 41, Age 14, BMI 13, Pregnancies 9, DiabetesPedigreeFunction 9, newInsu 8, and BloodPressure 6. Variables actually used in tree construction are Age, BMI, DiabetesPedigreeFunction, and Glucose. The two parallel plots shows that the R-square of the model continuously increase along the number of splits and the x relative error goes down with more splits.
+
+
+```{r}
+# Performance under cp value of 0.02
+tree_i_pruned <- prune(tree_i, cp=0.02)
+evaluation(tree_i_pruned, train.df, "class")
+evaluation(tree_i_pruned, test.df, "class")
+
+# Best Classification Tree
+tree_best <- prune(tree_i,cp = 0.02) #prune tree
+summary(tree_best)
+evaluation(tree_best, test.df, "class")
+rpart.plot(tree_best, extra = 104, nn = TRUE)
+
+# create additional plots 
+par(mfrow=c(1,2)) # two plots on one page 
+rsq.rpart(tree_best) # visualize cross-validation results   
+```
+
+## ROC
+
+```{r}
+par(mfrow=c(1,2)) # two plots on one page 
+
+# Train Data
+tree_best.predict.in <- predict(tree_best, train.df, type = "class")
+tree_best.pred.in <- predict(tree_best, train.df, type = "prob")
+confusionMatrix(train.df$Outcome, tree_best.predict.in)
+roc.plot(train.df$Outcome== "1", tree_best.pred.in[,2], ylab = "True Positive Rate", xlab = "False Positive Rate")$roc.vol
+
+# Test Data
+tree_best.predict<- predict(tree_best, test.df, type = "class")
+tree_best.pred<- predict(tree_best, test.df, type = "prob")
+confusionMatrix(test.df$Outcome, tree_best.predict)
+roc.plot(test.df$Outcome== "1", tree_best.pred[,2], ylab = "True Positive Rate", xlab = "False Positive Rate")$roc.vol
+```
+
+###### Higher-order
+
+```{r}
+### Model
+tree_higher <- rpart(Outcome ~ Age + Glucose + log(BMI) + DiabetesPedigreeFunction, train.df, method = "class", parms = list(split = "information"), control = rpart.control(cp=0.02))
+evaluation(tree_higher, train.df, "class")
+evaluation(tree_higher, test.df, "class")
+
+### ROC
+par(mfrow=c(1,2)) # two plots on one page 
+
+# Train Data
+tree_higher.predict.in <- predict(tree_higher, train.df, type = "class")
+tree_higher.pred.in <- predict(tree_higher, train.df, type = "prob")
+confusionMatrix(train.df$Outcome, tree_higher.predict.in)
+roc.plot(train.df$Outcome== "1", tree_higher.pred.in[,2], ylab = "True Positive Rate", xlab = "False Positive Rate")$roc.vol
+
+# Test Data
+tree_higher.predict<- predict(tree_higher, test.df, type = "class")
+tree_higher.pred<- predict(tree_higher, test.df, type = "prob")
+confusionMatrix(test.df$Outcome, tree_higher.predict)
+roc.plot(test.df$Outcome== "1", tree_higher.pred[,2], ylab = "True Positive Rate", xlab = "False Positive Rate")$roc.vol
+```
+
+########################################################################################
+
+KNN
+```{r}
+#diabetes$agebmi <- diabetes$BMI*diabetes$Age
+#diabetes$agebl <- diabetes$BloodPressure*diabetes$Age
+diabetes$agegl <- diabetes$Glucose*diabetes$Age
+
+seg.flg.num <- model.matrix(~., data = diabetes)
+seg.flg.num <- seg.flg.num [,-1]
+
+# scaling the data
+scaled_data <- scale(seg.flg.num)
+scaled_data <- as.data.frame(scaled_data) 
+
+set.seed(1)
+randOrder = order(runif(nrow(scaled_data)))
+train.df = subset(scaled_data,randOrder < .8 * nrow(scaled_data))
+test.df = subset(scaled_data,randOrder > .8 * nrow(scaled_data))
+
+# initialize a data frame with two columns: k, and accuracy.
+accuracy.df <- data.frame(k = seq(1, 14, 1), accuracy = rep(0, 14))
+train.df$Outcome <- as.factor(train.df$Outcome)
+test.df$Outcome <- as.factor(test.df$Outcome)
+
+# compute knn for different k on validation.
+for(i in 1:14) {
+  knn.pred <- knn(train.df%>% dplyr::select(-"Outcome"),test.df %>% dplyr::select(-"Outcome"), train.df$Outcome,k = i)
+  accuracy.df[i, 2] <- confusionMatrix(knn.pred, test.df$Outcome)$overall[1]
+}
+plot(accuracy.df)   # accuracy is highest when k = 9
+#accuracy.df
+
+accuracy.df2 <- data.frame(k = seq(1, 14, 1), accuracy = rep(0, 14))
+for(i in 1:14) {
+  knn.pred <- knn(train.df%>% dplyr::select(-"Outcome"),train.df %>% dplyr::select(-"Outcome"), train.df$Outcome,k = i)
+  accuracy.df2[i, 2] <- confusionMatrix(knn.pred, train.df$Outcome)$overall[1]
+}
+#accuracy.df2
+
+accuracy <- cbind(accuracy.df,accuracy.df2)[,c(1,2,4)]
+accuracy$dif <- accuracy$accuracy.1-accuracy$accuracy 
+
+plot(accuracy$dif)
+```
+
+
+
+
+
