@@ -1,0 +1,539 @@
+---
+title: "Regression"
+author: "Ran Dou, Mduduzi Langwenya, Kimo Li, Siyan Lin, Muhammad Furqan Shaikh, Tianyi Zhou"
+date: "03/09/2019"
+output: html_document
+---
+### Load the packages
+```{r}
+rm(list=ls())
+library(tidyverse)
+library(readr)
+library(tidyverse)
+library(forecast)
+library(leaps)
+library(pROC)
+library(ggplot2)
+library(reshape)
+library(car)
+library(leaps)
+library(corrplot)
+library(knitr)
+library(broom)
+```
+
+### I. Data cleaning and impution
+
+##### Data importing
+```{r}
+###import the raw diabetes data
+diabetes <- read_csv("diabetes.csv")
+###delete all the missing valuse
+diabetes1 <- diabetes %>%
+  filter( Glucose !=0 & BMI != 0 & BloodPressure != 0 & Insulin != 0 & SkinThickness != 0) %>%
+  select(Glucose, Insulin, Outcome, BMI, SkinThickness )
+```
+
+##### Fill-in Zero Value
+###### 1) Insulin
+```{r}
+### Insulin 
+# stepwise for choosing models for Insulin 
+insu.lm.null <- lm(Insulin~1, data = diabetes1)
+insu.lm <- lm(Insulin~., data = diabetes1)
+summary(insu.lm.null)
+summary(insu.lm)
+insu.lm.step_both <- step(insu.lm, direction = "both")
+sum_both <- summary(insu.lm.step_both)
+### create the model for imputing Insulin missing values
+lm.data <- lm (Insulin ~ Glucose + BMI, data=diabetes1)
+pred.1 <- predict (lm.data, diabetes1)
+impute <-function(a, a.impute){
+         ifelse(a$Insulin == 0, round(a.impute, 0), a$Insulin)
+}
+diabetes$newInsu <- impute(diabetes, pred.1)
+```
+
+###### 2) Skinthickness 
+```{r}
+### stepwise for choosing models for Insulin 
+skin.lm.null <- lm(SkinThickness~1, data = diabetes1)
+skin.lm <- lm(SkinThickness~., data = diabetes1)
+skin.lm.step_both <- step(skin.lm, direction = "both")
+sum_both_skin <- summary(skin.lm.step_both)
+### create the model for imputing SkinThickness missing values
+lm2.data <- lm(SkinThickness ~ BMI, data=diabetes1)
+pred.2 <- predict (lm2.data, diabetes1)
+impute <-function(a, a.impute){
+  ifelse(a$SkinThickness == 0, round(a.impute, 0), a$SkinThickness)
+}
+diabetes$newSkin <- impute(diabetes, pred.2)
+
+```
+
+***
+
+### II. Descriptive statistics and visualizations
+
+```{r}
+### Create theme for plots
+theme <- theme_test(base_family = "Times New Roman") + theme(plot.title = element_text(hjust = 0.5), 
+         legend.position = "bottom", panel.grid.minor = element_blank(), axis.ticks.x = element_blank(),
+         axis.ticks.y = element_blank(), panel.grid.major = element_blank())
+```
+
+```{r, fig.width=3}
+##### Raw Data
+### Descriptive Statistics
+melted_diabetes <- diabetes %>%
+  gather(Variables, Value, -c(Pregnancies, DiabetesPedigreeFunction, Outcome, newInsu, newSkin))
+ggplot(melted_diabetes,aes(x=Value)) +
+  geom_histogram()+ facet_wrap(~Variables, scales = "free_x") +
+  theme + labs(title = "Graph 1. Features Overview", x = "Features", y = "")
+# Delete missing value for other variables
+diabetes <- diabetes %>%
+  filter(BloodPressure !=0 & BMI !=0, Glucose != 0 & newInsu != 0)
+```
+
+```{r}
+##### New Data
+### Descriptive Statistics
+melted_diabetes <- diabetes %>%
+  gather(Variables, Value, -c(Pregnancies,DiabetesPedigreeFunction, Outcome, Insulin, Age))
+ggplot(melted_diabetes,aes(x=Value)) +
+  geom_histogram()+ facet_wrap(~Variables, scales = "free_x") +
+  theme + labs(title = "Graph 1. Features Overview", x = "Features", y = "")
+# Delete missing value for other variables
+diabetes <- diabetes %>%
+  filter(BloodPressure !=0 & BMI !=0, Glucose != 0 & newInsu != 0)
+```
+
+```{r, fig.width=3}
+### Histograms
+# Outcome
+summary(diabetes)
+ggplot(diabetes, aes( x = factor(Outcome))) + 
+  geom_histogram(stat = "count", width = 0.3) +
+  theme + labs(title = "Graph 2. Distribution of Outcome", x = "Outcome", y = "Count")
+```
+
+```{r}
+percentage <- diabetes %>% group_by(Outcome) %>% summarize(n = n()) %>% mutate(percentage = n/sum(n))
+pie <-ggplot(percentage, aes(x="", y=percentage,fill = factor(Outcome)))
+pie=pie+geom_bar(stat="identity", alpha = 0.6)+
+  coord_polar(theta="y")+
+  geom_text(aes(label = paste0(round(percentage*100, 2), "%")), position = position_stack(vjust = 0.5)) +
+  theme(legend.title = element_blank(), axis.text.x=element_blank(), axis.ticks.x = element_blank(),
+        axis.ticks.y = element_blank(), panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+        axis.line = element_blank(), panel.background = element_blank()) + 
+  labs(x = "", y = "") + 
+  scale_fill_manual(values = c("black","red"))
+pie
+```
+
+##### Create New Features
+```{r}
+# Create Age Ranges
+diabetes_v <- diabetes %>%
+  mutate( newAge = ifelse(Age <= 15, "0-15",
+                   ifelse(Age > 15 & Age <= 30, "16-30",
+                   ifelse(Age > 30 & Age <= 45, "31-45",
+                   ifelse(Age > 45 & Age <= 60, "46-60","60+")))))
+# Create BMI Ranges
+diabetes_v <- diabetes_v %>%
+  mutate( newBMI = ifelse(BMI <= 18.5, "Underweight",
+                   ifelse(BMI > 18.5 & BMI <= 25, "Normal",
+                   ifelse(BMI > 25 & BMI <= 30, "Over Weight",
+                          "Obese"))))
+diabetes_v$newBMI=factor(diabetes_v$newBMI, 
+                       levels=c("Underweight","Normal","Over Weight", "Obese"))
+```
+
+##### Visualizations
+
+```{r}
+diabetes <- diabetes %>%
+  select( Pregnancies, Glucose, BloodPressure,newInsu, newSkin, BMI, DiabetesPedigreeFunction, Age, Outcome)
+```
+
+```{r, fig.width=3}
+summary(diabetes_v)
+sd(diabetes_v$newInsu)
+# Target variable = Outcome
+ggplot(diabetes_v, aes( x = newInsu)) + 
+  geom_histogram() + 
+  theme + labs(title = "Graph 3. Distribution of Insulin", x = "Insulin", y = "Count")
+```
+
+```{r, fig.width=2}
+mean(diabetes_v$Glucose[diabetes_v$Outcome=="0"])
+mean(diabetes_v$Glucose[diabetes_v$Outcome=="1"])
+mean(diabetes_v$Age[diabetes_v$Outcome=="0"])
+mean(diabetes_v$Age[diabetes_v$Outcome=="1"])
+mean(diabetes_v$Glucose[diabetes_v$newAge=="16-30"])
+mean(diabetes_v$Glucose[diabetes_v$newAge=="31-45"])
+mean(diabetes_v$Glucose[diabetes_v$newAge=="46-60"])
+mean(diabetes_v$Glucose[diabetes_v$newAge=="60+"])
+```
+
+```{r, fig.width=2}
+# boxplots glucose by outcome
+ggplot(diabetes_v, aes(x = factor(Outcome), y = Glucose)) +
+  geom_boxplot(colour = "black", outline = FALSE, width = 0.6) +
+  theme + labs(title = "Graph 4. Distribution of Glucose by Outcome", x = "Outcome", y = "Glucose")
+
+# boxplots bloodpressure by outcome
+ggplot(diabetes_v, aes(x = factor(Outcome), y = BloodPressure)) +
+  geom_boxplot(colour = "black", outline = FALSE) +
+  theme + labs(title = "Graph 5. Distribution of BloodPressure by Outcome", x = "Outcome", y = "BloodPressure")
+
+# boxplots Age by outcome 
+ggplot(diabetes_v, aes(x = factor(Outcome), y = Age)) +
+  geom_boxplot(colour = "black", outline = FALSE) +
+  theme + labs(title = "Graph 6. Distribution of Age by Outcome", x = "Outcome", y = "Age")
+
+# boxplots bmi by outcome
+ggplot(diabetes_v, aes(x = factor(Outcome), y = BMI)) +
+  geom_boxplot(colour = "black", outline = FALSE) +
+  theme + labs(title = "Graph 7. Distribution of BMI by Outcome", x = "Outcome", y = "BMI")
+
+# boxplots pedigree by outcome
+ggplot(diabetes_v, aes(x = factor(Outcome), y = DiabetesPedigreeFunction)) +
+  geom_boxplot(colour = "black", outline = FALSE) +
+  theme + labs(title = "Graph 8. Distribution of DPF by Outcome", x = "Outcome", y = "DPF")
+
+# boxplots pedigree by outcome
+ggplot(diabetes_v, aes(x = factor(Outcome), y = newInsu)) +
+  geom_boxplot(colour = "black", outline = FALSE) +
+  theme + labs(title = "Graph 9. Distribution of Insulin by Outcome", x = "Outcome", y = "Insulin")
+```
+
+
+```{r, fig.width=2}
+# boxplots Glucose by Age
+ggplot(diabetes_v, aes(x = newAge, y = Glucose)) +
+  geom_boxplot(colour = "black") +
+  theme + labs(title = "Graph 10. Distribution of Glucose by Age", x = "Age", y = "Glucose")
+
+# boxplots bmi by Glucose
+ggplot(diabetes_v, aes(x = newBMI, y = Glucose)) +
+  geom_boxplot(colour = "black", outline = FALSE) +
+  theme + labs(title = "Graph 11. Distribution of Glucose by BMI", x = "BMI", y = "Glucose")
+
+# boxplots bmi by SkinThickness 
+ggplot(diabetes_v, aes(x = newBMI, y = SkinThickness)) +
+  geom_boxplot(colour = "black", outlier = FALSE) +
+  theme + labs(title = "Graph 12. Distribution of SkinThickness by BMI", x = "BMI", y = "SkinThickness") +
+  ylim(0, 75)
+```
+
+```{r, fig.width=2}
+# scatterplot age by glucose
+ggplot(data = diabetes)+
+  geom_point(mapping = aes(x = Age, y = Glucose), size = 0.5)+
+  geom_smooth(mapping = aes(x = Age, y = Glucose), se=FALSE, color = "red")+
+  theme + labs(title = "Graph 13. Regression of Glucose on Age", x = "Age", y = "Glucose")
+
+# scatterplot bmi by glucose
+ggplot(data = diabetes)+
+  geom_point(mapping = aes(x = BMI, y = Glucose), size = 0.5)+
+  geom_smooth(mapping = aes(x = BMI, y = Glucose), se=FALSE, color = "red")+
+  theme + labs(title = "Graph 14. Regression of Glucose on BMI", x = "BMI", y = "Glucose")
+
+# scatterplot DiabetesPedigreeFunction by glucose
+ggplot(data = diabetes)+
+  geom_point(mapping = aes(x = DiabetesPedigreeFunction, y = Glucose), size = 0.5)+
+  geom_smooth(mapping = aes(x = DiabetesPedigreeFunction, y = Glucose), se=FALSE, color = "red")+
+  theme + labs(title = "Graph 15. Regression of Glucose on DPF", x = "DiabetesPedigreeFunction", y = "Glucose")
+
+```
+
+```{r, fig.width=2}
+# choose log(bmi) to predict glucose, justify that choice.
+ggplot(data = diabetes)+
+  geom_point(mapping = aes(x = log(BMI), y = Glucose), size = 0.5)+
+  geom_smooth(mapping = aes(x = log(BMI), y = Glucose), se=FALSE, color = "red")+
+  theme + labs(title = "Graph 16. Regression of Glucose on log(BMI)", x = "log(BMI)", y = "Glucose")
+```
+
+
+```{r, fig.width=2}
+# choose log(age) to predict glucose, justify that choice.
+ggplot(data = diabetes)+
+  geom_point(mapping = aes(x = log(Age), y = Glucose), size = 0.5)+
+  geom_smooth(mapping = aes(x = log(Age), y = Glucose), se=FALSE, color = "red")+
+  theme + labs(title = "Graph 17. Regression of Glucose on log(Age)", x = "log(Age)", y = "Glucose")
+```
+
+##### Regression
+
+```{r}
+################################ linear regression part #############################
+set.seed(1)
+randOrder2 = order(runif(nrow(diabetes)))
+train.df2 = subset(diabetes,randOrder2 < .8 * nrow(diabetes))
+test.df2 = subset(diabetes,randOrder2 > .8 * nrow(diabetes))
+# delete outcome in the datasettrain.df2
+train.df2 <- train.df2[!names(train.df2) %in% c("Outcome")]
+```
+
+### correlation matrix
+
+```{r, fig.width=6}
+#plot the correlation matrix visual
+cor2 <- cor(train.df2)
+col <- colorRampPalette(c("#BB4444", "#EE9988", "#FFFFFF", "#77AADD", "#4477AA"))
+corrplot(cor2, method="color", col=col(200),  
+         type="upper", order="hclust", 
+         addCoef.col = "black", # Add coefficient of correlation
+         tl.col="black", tl.srt=45, #Text label color and rotation
+         # Combine with significance
+         sig.level = 0.01, insig = "blank", 
+         # hide correlation coefficient on the principal diagonal
+         diag=FALSE 
+         )
+```
+
+```{r}
+### forward
+# create model with no predictors for bottom of search range
+glu.lm.null <- lm(Glucose ~1, data = train.df2)
+glu.lm <- lm(Glucose ~., data = train.df2)
+# use step() to run forward selection
+glu.lm.step_for <- step(glu.lm.null,   
+                    scope=list(lower=glu.lm.null, upper=glu.lm), direction =  
+                      "forward")
+sum_for2 <- summary(glu.lm.step_for) 
+sum_for2 
+
+######
+Glucose ~ newInsu + BloodPressure +  Age + DiabetesPedigreeFunction + BMI
+```
+
+```{r}
+# backward
+glu.lm.step_back <- step(glu.lm, direction = "backward")
+sum_back2 <- summary(glu.lm.step_back) 
+summary(glu.lm.step_back) 
+
+#####
+Glucose ~ newInsu + BloodPressure +  Age + DiabetesPedigreeFunction + BMI
+```
+
+```{r}
+# both
+glu.lm.step_both <- step(glu.lm, direction = "both")
+sum_both2 <- summary(glu.lm.step_both) 
+sum_both2
+
+#####
+Glucose ~ newInsu + BloodPressure +  Age + DiabetesPedigreeFunction + BMI
+```
+
+```{r}
+# exhaustive
+search.exhaustive2 <- regsubsets(Glucose ~ . , data = train.df2, nbest = 1, nvmax = dim(train.df2)[2],
+                     method = "exhaustive")
+sum_exhaustive2 <- summary(search.exhaustive2)
+sum_exhaustive2
+
+# show models
+sum_exhaustive2$which
+# show metrics
+sum_exhaustive2$rsq;
+sum_exhaustive2$adjr2
+sum_exhaustive2$Cp
+
+#####
+Glucose ~ newInsu + BloodPressure +  Age + DiabetesPedigreeFunction + BMI
+```
+
+#### the best model for predict glucose
+Glucose ~ DiabetesPedigreeFunction + BloodPressur + newInsu
+```{r}
+#  use options() to ensure numbers are not displayed in scientific notation.
+options(scipen = 999)
+Glucose_model<-lm(Glucose~BloodPressure + newInsu + BMI + DiabetesPedigreeFunction + Age,data=train.df2)
+summary(Glucose_model)  # r^2 = 0.24
+RMSE <- round(sqrt(c(crossprod(Glucose_model$residuals)) / length(Glucose_model$residuals)),2)
+RMSE
+#check for Variance Inflation Factor (VIF); must be < 10; should be less than 5
+vif(Glucose_model)
+
+## additional diagnostics to checsk for outliers/leverage points
+par(mfrow=c(2,2))
+plot(Glucose_model)
+
+# remove outliers
+train.df3 <- train.df2[-c(206,146,45,34,49),]
+
+# use accuracy() to compute common accuracy measures. # rmse 26
+accuracy(predict(Glucose_model,train.df3), train.df3$Glucose) %>% kable()
+```
+
+#### Validation
+```{r}
+#### Table 6.4
+# use predict() to make predictions on a new set. 
+glu.lm.pred <- predict(glu.lm, test.df2)
+options(scipen=999, digits = 0)
+residuals <- test.df2$Glucose - glu.lm.pred
+result_glu<-data.frame("Predicted" = glu.lm.pred, "Actual" = test.df2$Glucose,
+           "Residual" = residuals)
+
+options(scipen=999, digits = 3)
+# use accuracy() to compute common accuracy measures.
+accuracy(glu.lm.pred, test.df2$Glucose) %>% kable()
+```
+
+```{r, fig.width=2}
+## histogram for residuals
+a<-data.frame(Glucose_model$residuals)
+# Histogram with density plot
+# Add mean line
+p2<-ggplot(a, aes(x=Glucose_model.residuals)) + 
+ geom_histogram(aes(y=..density..), colour="black", fill="white")+
+ geom_density(alpha=.2, fill="#FF6666")+
+  geom_vline(aes(xintercept=mean(Glucose_model.residuals)),
+            color="red", linetype="dashed", size=1) +
+  theme
+p2
+```
+
+##### High-order
+```{r}
+# add high-order variable to regression
+train.df2$exppedigree <- exp(train.df2$DiabetesPedigreeFunction)
+train.df2$logbmi <- log(train.df2$BMI)
+train.df2$logage <- log(train.df2$Age)
+
+# new model with high-order variables
+#options(scipen = 999)
+Glucose_modelhi<-lm(Glucose~BloodPressure + logage +  logbmi + exppedigree + newInsu, data=train.df2)
+sum_hi <- summary(Glucose_modelhi)
+
+# exp(DiabetesPedigreeFunction) did not change a lot (so we keep this model as our best one)
+Glucose_modelhi2<-lm(Glucose~BloodPressure + logage +  logbmi + DiabetesPedigreeFunction +
+    newInsu,data=train.df2)
+sum_hi2 <- summary(Glucose_modelhi2)
+
+# show metrics
+sum_hi  # adjust r^2 0.236, rmse 25.9
+sum_hi2
+
+RMSE <- round(sqrt(c(crossprod(sum_hi2$residuals)) / length(sum_hi2$residuals)),2)
+RMSE
+```
+
+```{r}
+# plot residuals and remove outliers (5/579 = 0.8%)
+# plot residuaals for high-order model
+plot(Glucose_modelhi2)
+train.df3 <- train.df2[-c(248,175,58,503,43),]
+
+Glucose_modelhi3<-lm(Glucose~BloodPressure + logage +  logbmi + DiabetesPedigreeFunction +
+    newInsu,data=train.df3)
+sum_hi3 <- summary(Glucose_modelhi3)
+#### Validation of high-order model
+# add high-order variable to regression
+test.df2$exppedigree <- exp(test.df2$DiabetesPedigreeFunction)
+test.df2$logbmi <- log(test.df2$BMI)
+test.df2$logage <- log(test.df2$Age)
+
+# use predict() to make predictions on a new set. 
+glu.lm.pred2 <- predict(Glucose_modelhi2, test.df2)
+
+# use accuracy() to compute common accuracy measures.
+accuracy(glu.lm.pred2, test.df2$Glucose) %>% kable()
+```
+
+```{r}
+################################ logistic regression part #############################
+# CHANGE DATA TYPE
+diabetes$Outcome <- as.factor(diabetes$Outcome)
+diabetes$Pregnancies <- as.factor(diabetes$Pregnancies)
+
+# divide data into train and test set
+set.seed(1)
+randOrder = order(runif(nrow(diabetes)))
+train.df = subset(diabetes,randOrder < .8 * nrow(diabetes))
+test.df = subset(diabetes,randOrder > .8 * nrow(diabetes))
+```
+
+##### correlation matrix
+
+```{r, fig.width=6}
+# plot the correlation matrix visual
+train.df$Outcome <- as.numeric(train.df$Outcome)
+train.df$Pregnancies <- as.numeric(train.df$Pregnancies)
+cor <- cor(train.df)
+col <- colorRampPalette(c("#BB4444", "#EE9988", "#FFFFFF", "#77AADD", "#4477AA"))
+corrplot(cor, method="color", col=col(200),  
+         type="upper", order="hclust", 
+         addCoef.col = "black", # Add coefficient of correlation
+         tl.col="black", tl.srt=45, #Text label color and rotation
+         # Combine with significance
+         sig.level = 0.01, insig = "blank", 
+         # hide correlation coefficient on the principal diagonal
+         diag=FALSE 
+         )
+```
+
+```{r}
+train.df$Outcome <- as.factor(train.df$Outcome)
+train.df$Pregnancies <- as.factor(train.df$Pregnancies)
+```
+
+```{r}
+### Forward Step-wise
+# create model with no predictors for bottom of search range
+dia.lm.null <- glm(Outcome~1, data = train.df, family = binomial)
+dia.lm <- glm(Outcome~., data = train.df, family = binomial)
+# use step() to run forward selection
+dia.lm.step_for <- step(dia.lm.null,   
+                    scope=list(lower=dia.lm.null, upper=dia.lm), direction = "forward")
+sum_for <- summary(dia.lm.step_for) 
+
+# Backward Step-wise
+dia.lm.step_back <- step(dia.lm, direction = "backward")
+sum_back <- summary(dia.lm.step_back) 
+
+# Both Direction Step-wise
+dia.lm.step_both <- step(dia.lm, direction = "both")
+sum_both <- summary(dia.lm.step_both) 
+
+# search
+search <- regsubsets(Outcome ~ ., data = train.df, nbest = 1, 	nvmax = dim(train.df)[2], method = "exhaustive")
+sum_sear <-summary(search)
+sum_sear$which;
+sum_sear$rsq;
+sum_sear$adjr2;
+sum_sear$Cp;
+
+# comparison 
+# same models with different methods
+sum_for$coefficients
+sum_back$coefficients
+sum_both$coefficients
+
+# best model with aic 536.4962
+sum_for$aic
+
+# Prediction on test data and accuracy test (73.1%)
+tst_pred <- ifelse(predict(dia.lm.step_for, newdata = test.df, type = "response") > 0.5, "Yes", "No")
+tst_tab <- table(predicted = tst_pred, actual = test.df$Outcome); sum(diag(tst_tab))/sum(tst_tab)
+test_prob <- predict(dia.lm.step_for, newdata = test.df, type = "response")
+test_roc <- roc(test.df$Outcome ~ test_prob, plot = TRUE, print.auc = TRUE) # 0.774
+```
+
+```{r, fig.width=3}
+model1_data <- augment(dia.lm.step_for) %>% 
+  mutate(index = 1:n()) %>%
+  mutate(Outcome = ifelse(Outcome == "1", "0", "1"))
+c <- ggplot(model1_data, aes(index, .std.resid, color = Outcome)) + 
+  geom_point(stat = "identity") +
+  labs(title = "Standardized Deviance Residuals", y = "Residual Std", x ="Residuals") +
+  theme
+c
+```
+
